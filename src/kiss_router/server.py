@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from uuid import uuid4
 
 from .client import ChatClient
 from .config import load_config
@@ -19,9 +18,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict):
+                raise ValueError("request body must be an object")
             messages = body.get("messages")
-            if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
-                raise ValueError("messages must be an array")
+            if not isinstance(messages, list) or not messages or not all(
+                isinstance(m, dict) and isinstance(m.get("role"), str) and isinstance(m.get("content"), str)
+                for m in messages
+            ):
+                raise ValueError("messages must contain role and string content")
             result = asyncio.run(self.router.handle(messages))
             self._json(200, {
                 "id": f"chatcmpl-{result.event.request_id}",
@@ -34,7 +38,7 @@ class Handler(BaseHTTPRequestHandler):
                     "total_tokens": (result.response.input_tokens or 0) + (result.response.output_tokens or 0),
                 },
             })
-        except ValueError as error:
+        except (ValueError, json.JSONDecodeError) as error:
             self._json(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
         except Exception as error:
             self._json(502, {"error": {"message": str(error), "type": "upstream_error"}})
