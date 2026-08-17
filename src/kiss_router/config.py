@@ -66,13 +66,19 @@ def load_config(path: str | Path) -> RouterConfig:
         raise ConfigError("version must be 1")
 
     server = _need(raw, "server")
-    host = _need(server, "host")
-    port = _need(server, "port")
+    if not isinstance(server, dict):
+        raise ConfigError("server must be an object")
+    host, port = _need(server, "host"), _need(server, "port")
     if not isinstance(host, str) or not host or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ConfigError("invalid server configuration")
 
+    raw_models = _need(raw, "models")
+    if not isinstance(raw_models, list):
+        raise ConfigError("models must be an array")
     models: dict[str, ModelConfig] = {}
-    for item in _need(raw, "models"):
+    for item in raw_models:
+        if not isinstance(item, dict):
+            raise ConfigError("invalid model")
         try:
             model = ModelConfig(**{key: _need(item, key) for key in (
                 "id", "name", "endpoint", "model", "timeout_seconds", "temperature", "max_tokens")})
@@ -90,11 +96,18 @@ def load_config(path: str | Path) -> RouterConfig:
         raise ConfigError("models must contain exactly l1 and l2")
 
     routing = _need(raw, "routing")
+    if not isinstance(routing, dict):
+        raise ConfigError("routing must be an object")
     default_route = _need(routing, "default_route")
     if default_route not in models:
         raise ConfigError("invalid default_route")
+    raw_rules = routing.get("rules", [])
+    if not isinstance(raw_rules, list):
+        raise ConfigError("routing.rules must be an array")
     rules = []
-    for item in routing.get("rules", []):
+    for item in raw_rules:
+        if not isinstance(item, dict):
+            raise ConfigError("invalid rule")
         try:
             rule = RuleConfig(_need(item, "name"), _need(item, "enabled"), _need(item, "condition"), _need(item, "route"))
         except (TypeError, ConfigError) as error:
@@ -117,6 +130,8 @@ def load_config(path: str | Path) -> RouterConfig:
         rules.append(rule)
 
     l1 = _need(raw, "l1")
+    if not isinstance(l1, dict):
+        raise ConfigError("l1 must be an object")
     prompt = _need(l1, "routing_prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ConfigError("l1.routing_prompt must be non-empty")
