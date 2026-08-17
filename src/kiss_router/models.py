@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -17,6 +16,7 @@ class ChatResult:
     model: str
     input_tokens: int | None = None
     output_tokens: int | None = None
+    latency_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,10 @@ class RoutingEvent:
     confidence: float | None
     success: bool
     escalation: bool
+    l1_latency_ms: int = 0
+    l1_input_tokens: int | None = None
+    l1_output_tokens: int | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
