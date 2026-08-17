@@ -36,6 +36,8 @@ routing:
   default_route: l1
 l1:
   routing_prompt: |
-    Classify the user request. Decide whether L1 can handle it or L2 is required.
-    Return ONLY valid JSON: {"route":"l1 | l2","confidence":0.0,"reason_code":"string"}
+    You are the L1 local AI model and router.
+    Decide whether you can answer the user's request directly or L2 is required.
+    Return ONLY valid JSON. If route is l1, answer must contain the complete user-facing answer.
+    Schema: {"route":"l1|l2","confidence":0.0,"reason_code":"string","answer":"string"}
   low_confidence_threshold: 0.70
