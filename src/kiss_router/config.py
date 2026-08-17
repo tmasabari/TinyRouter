@@ -1,0 +1,88 @@
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+class ConfigError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    id: str
+    name: str
+    endpoint: str
+    model: str
+    timeout_seconds: float
+    temperature: float
+    max_tokens: int
+
+
+@dataclass(frozen=True)
+class RuleConfig:
+    name: str
+    enabled: bool
+    condition: dict[str, Any]
+    route: str
+
+
+@dataclass(frozen=True)
+class RouterConfig:
+    models: dict[str, ModelConfig]
+    rules: tuple[RuleConfig, ...]
+    default_route: str
+    routing_prompt: str
+    low_confidence_threshold: float
+
+
+def _need(data: dict[str, Any], key: str) -> Any:
+    if key not in data:
+        raise ConfigError(f"missing {key}")
+    return data[key]
+
+
+def load_config(path: str | Path) -> RouterConfig:
+    try:
+        import yaml
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except ImportError as error:
+        raise ConfigError("PyYAML is required; install the project dependencies") from error
+    except (OSError, yaml.YAMLError) as error:
+        raise ConfigError(str(error)) from error
+    if not isinstance(raw, dict) or raw.get("version") != 1:
+        raise ConfigError("version must be 1")
+    models: dict[str, ModelConfig] = {}
+    for item in _need(raw, "models"):
+        try:
+            model = ModelConfig(**{key: _need(item, key) for key in (
+                "id", "name", "endpoint", "model", "timeout_seconds", "temperature", "max_tokens")})
+        except (TypeError, ConfigError) as error:
+            raise ConfigError(f"invalid model: {error}") from error
+        if model.id not in {"l1", "l2"} or model.id in models or not model.endpoint.startswith(("http://", "https://")):
+            raise ConfigError(f"invalid model {model.id}")
+        models[model.id] = model
+    if set(models) != {"l1", "l2"}:
+        raise ConfigError("models must contain exactly l1 and l2")
+    routing = _need(raw, "routing")
+    default_route = _need(routing, "default_route")
+    if default_route not in models:
+        raise ConfigError("invalid default_route")
+    rules = []
+    for item in routing.get("rules", []):
+        try:
+            rule = RuleConfig(_need(item, "name"), _need(item, "enabled"), _need(item, "condition"), _need(item, "route"))
+        except (TypeError, ConfigError) as error:
+            raise ConfigError(f"invalid rule: {error}") from error
+        if not isinstance(rule.enabled, bool) or rule.route not in models or not isinstance(rule.condition, dict):
+            raise ConfigError(f"invalid rule {rule.name}")
+        if set(rule.condition) - {"keywords", "prompt_chars"} or not rule.condition:
+            raise ConfigError(f"unsupported condition in {rule.name}")
+        rules.append(rule)
+    l1 = _need(raw, "l1")
+    prompt = _need(l1, "routing_prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ConfigError("l1.routing_prompt must be non-empty")
+    threshold = l1.get("low_confidence_threshold", 0.0)
+    if not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
+        raise ConfigError("l1.low_confidence_threshold must be between 0 and 1")
+    return RouterConfig(models, tuple(rules), default_route, prompt, float(threshold))

@@ -1,0 +1,41 @@
+version: 1
+server:
+  host: 127.0.0.1
+  port: 8090
+models:
+  - id: l1
+    name: qwen3.6-0.8b
+    endpoint: http://127.0.0.1:8081/v1
+    model: qwen3.6-0.8b
+    role: router
+    timeout_seconds: 10
+    temperature: 0.0
+    max_tokens: 256
+  - id: l2
+    name: lfm2.5-8b-a1b
+    endpoint: http://127.0.0.1:8082/v1
+    model: lfm2.5-8b-a1b
+    role: worker
+    timeout_seconds: 60
+    temperature: 0.2
+    max_tokens: 2048
+routing:
+  rules:
+    - name: long_prompt
+      enabled: true
+      condition: {prompt_chars: {gt: 5000}}
+      route: l2
+    - name: coding
+      enabled: true
+      condition: {keywords: {any: [implement, refactor, debug, repository, source code]}}
+      route: l2
+    - name: architecture
+      enabled: true
+      condition: {keywords: {any: [architecture, system design]}}
+      route: l2
+  default_route: l1
+l1:
+  routing_prompt: |
+    Classify the user request. Decide whether L1 can handle it or L2 is required.
+    Return ONLY valid JSON: {"route":"l1 | l2","confidence":0.0,"reason_code":"string"}
+  low_confidence_threshold: 0.70
