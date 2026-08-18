@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .client import ChatClient
 from .config import load_config
+from .logger import AsyncLogger
 from .orchestrator import Orchestrator
 
 
@@ -55,9 +56,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-TinyRouter-Route", event.route)
             self.send_header("X-TinyRouter-Source", event.source)
             self.send_header("X-TinyRouter-Model", event.model)
-            self.send_header("X-TinyRouter-L1-Latency-Ms", str(event.l1_latency_ms))
             self.send_header("X-TinyRouter-Total-Latency-Ms", str(event.latency_ms))
             self.send_header("X-TinyRouter-Escalation", str(event.escalation).lower())
+            self.send_header("X-TinyRouter-Hops", str(event.hops))
         self.end_headers()
         self.wfile.write(data)
 
@@ -67,15 +68,17 @@ def main():
     parser.add_argument("--config", default="config/router.yaml")
     args = parser.parse_args()
     config = load_config(args.config)
-    Handler.router = Orchestrator(config, ChatClient())
+    logger = AsyncLogger(config.logging)
+    Handler.router = Orchestrator(config, ChatClient(), logger.logger)
     server = ThreadingHTTPServer((config.server.host, config.server.port), Handler)
-    print(f"TinyRouter listening on http://{config.server.host}:{config.server.port}/v1/chat/completions")
+    logger.info("TinyRouter listening on http://%s:%d/v1/chat/completions", config.server.host, config.server.port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        logger.close()
 
 
 if __name__ == "__main__":
