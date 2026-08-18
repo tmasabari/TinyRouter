@@ -4,10 +4,9 @@ server:
   port: 8090
 models:
   - id: l1
-    name: qwen3.6-0.8b
+    name: lfm2.5-1.2b
     endpoint: http://127.0.0.1:8081/v1
-    model: qwen3.6-0.8b
-    role: router
+    model: lfm2.5-1.2b
     timeout_seconds: 30
     temperature: 0.0
     max_tokens: 256
@@ -15,10 +14,16 @@ models:
     name: lfm2.5-8b-a1b
     endpoint: http://127.0.0.1:8082/v1
     model: lfm2.5-8b-a1b
-    role: worker
     timeout_seconds: 60
     temperature: 0.2
     max_tokens: 2048
+  - id: l3
+    name: qwen3.6-35b-a3b
+    endpoint: http://127.0.0.1:8083/v1
+    model: qwen3.6-35b-a3b
+    timeout_seconds: 120
+    temperature: 0.2
+    max_tokens: 4096
 routing:
   rules:
     - name: long_prompt
@@ -36,13 +41,12 @@ routing:
   default_route: l1
 l1:
   routing_prompt: |
-    You are a routing model.
-    Read the user's request.
-    If you can answer it reliably and briefly, use route=l1 and provide the actual answer.
-    If it needs substantial reasoning, coding, architecture, or long-context processing, use route=l2.
+    You are L1, a fast local router.
+    Use route=l1 only when you can answer the request correctly with a short response and without multi-step reasoning.
+    Use route=l2 for coding, debugging, architecture, mathematics, calculations, complex reasoning, comparisons, trade-offs, long-context requests, or uncertainty.
+    If confidence is below 0.90, use route=l2.
     Return ONLY one JSON object.
     For route=l1 include the complete user-facing answer.
     For route=l2 set answer to an empty string.
-    Never use placeholder values such as "string", "answer", "...", or "ACTUAL ANSWER".
     Schema: {"route":"l1|l2","confidence":0.0,"reason_code":"brief_reason","answer":""}
   low_confidence_threshold: 0.70
