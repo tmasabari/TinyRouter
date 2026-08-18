@@ -4,48 +4,68 @@ from uuid import uuid4
 
 from .client import ChatClient
 from .config import RouterConfig
-from .l1 import L1Router
-from .models import HandleResult, RoutingEvent, RouteDecision
+from .models import HandleResult, RouteDecision, RoutingEvent
 from .rules import evaluate
+from .worker import ModelWorker
 
 
 class Orchestrator:
-    def __init__(self, config: RouterConfig, client: ChatClient):
-        self.config, self.client = config, client
-        self.l1 = L1Router(client, config.models["l1"], config.routing_prompt, config.low_confidence_threshold)
-        self.events: list[RoutingEvent] = []
+    def __init__(self, config: RouterConfig, client: ChatClient, logger=None):
+        self.config, self.client, self.logger = config, client, logger
+        self.workers = {key: ModelWorker(client, model, model.capability_prompt) for key, model in config.models.items()}
+        self.events = []
 
-    async def handle(self, messages: list[dict[str, str]]) -> HandleResult:
+    async def handle(self, messages):
         messages, override = self._model_override(messages)
-        prompt = "\n".join(message["content"] for message in messages if message.get("role") == "user")
+        prompt = "\n".join(m["content"] for m in messages if m.get("role") == "user")
         if not prompt:
             raise ValueError("a user message is required")
-        started, request_id = time.perf_counter(), str(uuid4())
-        decision = RouteDecision(override, "user_override") if override else evaluate(prompt, self.config.rules, self.config.default_route)
-        l1_result = None
-        l1_latency = 0
-        target = self.config.models[decision.route]
-        try:
-            if decision.route == "l1":
-                decision, l1_result = await self.l1.route(prompt, messages)
-                l1_latency = l1_result.latency_ms
-                target = self.config.models[decision.route]
-                response = l1_result if decision.route == "l1" else await self.client.chat(target, messages)
-            else:
-                response = await self.client.chat(target, messages)
-            event = self._event(request_id, decision, target.name, response, prompt, started, l1_result, l1_latency)
-            self.events.append(event)
-            return HandleResult(response, decision, event)
-        except Exception as exc:
-            event = self._event(request_id, decision, target.name, None, prompt, started, l1_result, l1_latency, str(exc))
-            self.events.append(event)
-            raise
+        request_id, started = str(uuid4()), time.perf_counter()
+        if override:
+            result = await self.client.chat(self.config.models[override], messages)
+            decision = RouteDecision(override, "user_override")
+            return self._finish(request_id, decision, result, prompt, started, 1)
 
-    def _model_override(self, messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], str | None]:
+        decision = evaluate(prompt, self.config.rules, self.config.default_route)
+        visited = set()
+        for hop in range(self.config.max_hops):
+            route = decision.route
+            if route in visited:
+                raise RuntimeError(f"routing cycle detected at {route}")
+            visited.add(route)
+            worker = self.workers[route]
+            self.logger.debug("request=%s hop=%d model=%s source=%s", request_id, hop, route, decision.source) if self.logger else None
+            try:
+                capability = await worker.invoke(messages)
+            except Exception as error:
+                self.logger.error("request=%s model=%s error=%s", request_id, route, error) if self.logger else None
+                raise
+            if capability.can_handle:
+                result = capability.result
+                result = type(result)(capability.answer, result.model, result.input_tokens, result.output_tokens, result.latency_ms)
+                return self._finish(request_id, RouteDecision(route, decision.source, decision.rule, capability.reason_code), result, prompt, started, hop + 1)
+            next_decision = evaluate(prompt, self.config.rules, self.config.escalation_defaults.get(route, ""), route, capability.reason_code)
+            if not next_decision.route or next_decision.route == route:
+                raise RuntimeError(f"no escalation route configured for {route}: {capability.reason_code}")
+            decision = next_decision
+
+        raise RuntimeError(f"maximum routing hops exceeded ({self.config.max_hops})")
+
+    def _finish(self, request_id, decision, response, prompt, started, hops):
+        event = RoutingEvent(request_id, decision.route, decision.source, decision.rule, response.model,
+                             round((time.perf_counter() - started) * 1000), len(prompt),
+                             response.input_tokens, response.output_tokens, True,
+                             hops > 1, hops=hops)
+        self.events.append(event)
+        if self.logger:
+            self.logger.info("request=%s route=%s model=%s hops=%d latency_ms=%d", request_id, decision.route, response.model, hops, event.latency_ms)
+        return HandleResult(response, decision, event)
+
+    def _model_override(self, messages):
         for index, message in enumerate(messages):
             if message.get("role") != "user":
                 continue
-            match = re.match(r"^@(l[123])(?:\s+|$)", message["content"], re.IGNORECASE)
+            match = re.match(r"^@(l\d+)(?:\s+|$)", message["content"], re.IGNORECASE)
             if not match:
                 return messages, None
             route = match.group(1).lower()
@@ -55,14 +75,3 @@ class Orchestrator:
             updated[index]["content"] = message["content"][match.end():].lstrip()
             return updated, route
         return messages, None
-
-    @staticmethod
-    def _event(request_id, decision, model, response, prompt, started, l1_result, l1_latency, error=None):
-        return RoutingEvent(request_id, decision.route, decision.source, decision.rule, model,
-                            round((time.perf_counter() - started) * 1000), len(prompt),
-                            response.input_tokens if response else None,
-                            response.output_tokens if response else None,
-                            decision.confidence, error is None,
-                            decision.source.startswith("l1"), l1_latency,
-                            l1_result.input_tokens if l1_result else None,
-                            l1_result.output_tokens if l1_result else None, error)
