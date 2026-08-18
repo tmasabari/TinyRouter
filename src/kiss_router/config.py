@@ -49,6 +49,7 @@ class RouterConfig:
     rules: tuple[RuleConfig, ...]
     default_route: str
     escalation_defaults: dict[str, str]
+    max_hops: int
     logging: LoggingConfig
 
 
@@ -156,5 +157,5 @@ def load_config(path: str | Path) -> RouterConfig:
         raise ConfigError("logging.file must be a string")
 
     return RouterConfig(ServerConfig(host, port), models, tuple(rules), default_route,
-                        {str(k): str(v) for k, v in defaults.items()},
+                        {str(k): str(v) for k, v in defaults.items()}, max_hops,
                         LoggingConfig(level, logging_raw.get("console", True), file, queue_size))
