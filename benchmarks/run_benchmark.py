@@ -26,12 +26,12 @@ def prompt_for(item):
     return item["prompt"] + block * item["repeat"]
 
 
-def chat(url, model, prompt, timeout):
+def chat(url, model, prompt, timeout, temperature=0, max_tokens=256):
     body = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 256,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }).encode()
     request = urllib.request.Request(url, body, {"Content-Type": "application/json"})
     started = time.perf_counter()
@@ -59,8 +59,7 @@ def chat(url, model, prompt, timeout):
 def summarize(rows):
     groups = {}
     for row in rows:
-        group = groups.setdefault(row["category"], [])
-        group.append(row)
+        groups.setdefault(row["category"], []).append(row)
 
     summary = []
     for category, items in groups.items():
@@ -99,11 +98,13 @@ def main():
     args = parser.parse_args()
 
     dataset = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
+    if len(dataset) != 50:
+        raise ValueError(f"expected exactly 50 benchmark prompts, found {len(dataset)}")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     print("Warming up L2 and TinyRouter...")
-    chat(args.l2, args.l2_model, "Reply with OK.", args.timeout)
+    chat(args.l2, args.l2_model, "Reply with OK.", args.timeout, temperature=0.2, max_tokens=2048)
     chat(args.router, "router", "Reply with OK.", args.timeout)
 
     rows = []
@@ -111,7 +112,7 @@ def main():
         for index, item in enumerate(dataset, 1):
             prompt = prompt_for(item)
             print(f"[{repeat + 1}/{args.repeats}] {index:02d}/50 {item['category']:<16} {item['id']}")
-            baseline = chat(args.l2, args.l2_model, prompt, args.timeout)
+            baseline = chat(args.l2, args.l2_model, prompt, args.timeout, temperature=0.2, max_tokens=2048)
             routed = chat(args.router, "router", prompt, args.timeout)
             rows.append({
                 "id": item["id"],

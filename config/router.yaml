@@ -9,8 +9,8 @@ models:
     model: qwen3.6-0.8b
     role: router
     timeout_seconds: 10
-    temperature: 0.0
-    max_tokens: 256
+    temperature: 0.1
+    max_tokens: 2560
   - id: l2
     name: lfm2.5-8b-a1b
     endpoint: http://127.0.0.1:8082/v1
@@ -18,7 +18,7 @@ models:
     role: worker
     timeout_seconds: 60
     temperature: 0.2
-    max_tokens: 2048
+    max_tokens: 20480
 routing:
   rules:
     - name: long_prompt

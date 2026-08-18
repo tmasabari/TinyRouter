@@ -221,6 +221,129 @@ The tests cover the core routing contract, including:
 - malformed L1 output and retry/fallback;
 - failure telemetry.
 
+## Benchmark
+
+The repository includes a fixed **50-request benchmark set**:
+
+```text
+10 simple
+10 medium
+10 complex
+10 obvious coding
+10 long-context
+```
+
+The prompts are in `benchmarks/test_set.json`. The long-context prompts are expanded at runtime so the repository does not contain 100 KB of duplicated text.
+
+### 1. Start the model servers
+
+Use your normal llama.cpp commands, with the endpoints configured as:
+
+```text
+Qwen 3.6 0.8B   → http://127.0.0.1:8081/v1
+LFM2.5-8B-A1B   → http://127.0.0.1:8082/v1
+TinyRouter      → http://127.0.0.1:8090/v1
+```
+
+### 2. Start TinyRouter
+
+```bash
+tiny-router --config config/router.yaml
+```
+
+### 3. Run the benchmark
+
+From the repository root:
+
+```bash
+python benchmarks/run_benchmark.py
+```
+
+The default runner compares every prompt against:
+
+```text
+Baseline:   prompt → L2
+Router:     prompt → TinyRouter → L1/L2
+```
+
+It performs one warm-up request against each path first, then measures all 50 prompts.
+
+Results are written to:
+
+```text
+benchmark-results/results.csv
+benchmark-results/summary.json
+```
+
+The CSV contains per-request latency, prompt size, route, source, L1 latency, escalation, and token usage where the model server reports it.
+
+The router exposes benchmark-only metadata through response headers such as:
+
+```text
+X-TinyRouter-Route
+X-TinyRouter-Source
+X-TinyRouter-Model
+X-TinyRouter-L1-Latency-Ms
+X-TinyRouter-Total-Latency-Ms
+X-TinyRouter-Escalation
+```
+
+These avoid adding a separate telemetry API to the POC.
+
+### Useful options
+
+Run three passes:
+
+```bash
+python benchmarks/run_benchmark.py --repeats 3
+```
+
+Use different endpoints:
+
+```bash
+python benchmarks/run_benchmark.py \
+  --router http://127.0.0.1:8090/v1/chat/completions \
+  --l2 http://127.0.0.1:8082/v1/chat/completions
+```
+
+Use a different result directory:
+
+```bash
+python benchmarks/run_benchmark.py --out benchmark-results/run-01
+```
+
+### Interpreting the result
+
+The primary metric is **L2 calls avoided**.
+
+For 50 requests, if TinyRouter produces:
+
+```text
+L1 handled       25
+L1 escalated     10
+Direct L2        15
+Total L2 calls   25
+```
+
+then:
+
+```text
+L2 calls avoided = 50 - 25 = 25
+L2 avoidance     = 50%
+```
+
+Also compare:
+
+- baseline average latency vs router average latency;
+- L1 routing latency;
+- L1 escalation rate;
+- route accuracy against the benchmark's expected routing hypothesis;
+- token usage where available.
+
+The expected routes are deliberately simple hypotheses: simple/medium → L1, complex/coding/long-context → L2. They are not a claim that every model decision is objectively wrong when it differs. Review misroutes manually before changing the rules or L1 prompt.
+
+**Do not use Open WebUI for this benchmark.** It adds another context and network layer and makes the routing experiment harder to interpret. Benchmark the router endpoint directly first.
+
 ## Telemetry
 
 The POC records routing events in memory.
@@ -239,6 +362,9 @@ This is intentionally not backed by a database or distributed telemetry system y
 
 ```text
 TinyRouter/
+├── benchmarks/
+│   ├── test_set.json
+│   └── run_benchmark.py
 ├── config/
 │   └── router.yaml
 ├── docs/
