@@ -241,10 +241,9 @@ logging:
   console: true
   file: logs/tinyrouter.log
   queue_size: 4096
-  include_content: false
 ```
 
-`include_content` defaults to false. Prompts and model responses must not be logged by default.
+Prompt/response content is not logged by default.
 
 The logger is stopped during server shutdown so queued records are flushed.
 
@@ -309,7 +308,7 @@ The POC intentionally does not add generic transport retries or circuit breakers
 
 ## 13. Tests
 
-Tests must cover:
+Tests cover:
 
 - configuration validation;
 - rule ordering;
@@ -323,7 +322,8 @@ Tests must cover:
 - user overrides;
 - unknown overrides;
 - cycle protection;
-- failed-request telemetry.
+- failed-request telemetry;
+- async logger behavior.
 
 The benchmark remains separate from unit tests.
 
