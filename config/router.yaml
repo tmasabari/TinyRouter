@@ -74,4 +74,3 @@ logging:
   console: true
   file: logs/tinyrouter.log
   queue_size: 4096
-  include_content: false
