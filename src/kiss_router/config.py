@@ -19,6 +19,7 @@ class ModelConfig:
     name: str
     endpoint: str
     model: str
+    capability_prompt: str
     timeout_seconds: float
     temperature: float
     max_tokens: int
@@ -30,6 +31,16 @@ class RuleConfig:
     enabled: bool
     condition: dict[str, Any]
     route: str
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class LoggingConfig:
+    level: str = "INFO"
+    console: bool = True
+    file: str | None = None
+    queue_size: int = 4096
+    include_content: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,20 +49,14 @@ class RouterConfig:
     models: dict[str, ModelConfig]
     rules: tuple[RuleConfig, ...]
     default_route: str
-    routing_prompt: str
-    low_confidence_threshold: float
+    escalation_defaults: dict[str, str]
+    logging: LoggingConfig
 
 
 def _need(data: dict[str, Any], key: str) -> Any:
     if key not in data:
         raise ConfigError(f"missing {key}")
     return data[key]
-
-
-def _number(value: Any, name: str, minimum: float = 0) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < minimum:
-        raise ConfigError(f"{name} must be >= {minimum}")
-    return float(value)
 
 
 def load_config(path: str | Path) -> RouterConfig:
@@ -73,27 +78,30 @@ def load_config(path: str | Path) -> RouterConfig:
         raise ConfigError("invalid server configuration")
 
     raw_models = _need(raw, "models")
-    if not isinstance(raw_models, list):
-        raise ConfigError("models must be an array")
+    if not isinstance(raw_models, list) or not raw_models:
+        raise ConfigError("models must be a non-empty array")
     models: dict[str, ModelConfig] = {}
     for item in raw_models:
         if not isinstance(item, dict):
             raise ConfigError("invalid model")
         try:
             model = ModelConfig(**{key: _need(item, key) for key in (
-                "id", "name", "endpoint", "model", "timeout_seconds", "temperature", "max_tokens")})
+                "id", "name", "endpoint", "model", "capability_prompt", "timeout_seconds", "temperature", "max_tokens")})
         except (TypeError, ConfigError) as error:
             raise ConfigError(f"invalid model: {error}") from error
-        if model.id not in {"l1", "l2", "l3"} or model.id in models or not model.endpoint.startswith(("http://", "https://")):
+        if not isinstance(model.id, str) or not model.id.startswith("l") or not model.id[1:].isdigit() or model.id in models or not model.endpoint.startswith(("http://", "https://")):
             raise ConfigError(f"invalid model {model.id}")
-        _number(model.timeout_seconds, f"{model.id}.timeout_seconds", 0.001)
+        if not isinstance(model.capability_prompt, str) or not model.capability_prompt.strip():
+            raise ConfigError(f"{model.id}.capability_prompt must be non-empty")
+        if isinstance(model.timeout_seconds, bool) or not isinstance(model.timeout_seconds, (int, float)) or model.timeout_seconds <= 0:
+            raise ConfigError(f"{model.id}.timeout_seconds must be > 0")
         if isinstance(model.max_tokens, bool) or not isinstance(model.max_tokens, int) or model.max_tokens <= 0:
             raise ConfigError(f"{model.id}.max_tokens must be > 0")
         if isinstance(model.temperature, bool) or not isinstance(model.temperature, (int, float)) or model.temperature < 0:
             raise ConfigError(f"{model.id}.temperature must be >= 0")
         models[model.id] = model
-    if not {"l1", "l2"}.issubset(models):
-        raise ConfigError("models must contain l1 and l2")
+    if "l1" not in models:
+        raise ConfigError("models must contain l1")
 
     routing = _need(raw, "routing")
     if not isinstance(routing, dict):
@@ -108,18 +116,21 @@ def load_config(path: str | Path) -> RouterConfig:
     for item in raw_rules:
         if not isinstance(item, dict):
             raise ConfigError("invalid rule")
-        try:
-            rule = RuleConfig(_need(item, "name"), _need(item, "enabled"), _need(item, "condition"), _need(item, "route"))
-        except (TypeError, ConfigError) as error:
-            raise ConfigError(f"invalid rule: {error}") from error
+        rule = RuleConfig(_need(item, "name"), _need(item, "enabled"), _need(item, "condition"), _need(item, "route"), item.get("source"))
         if not isinstance(rule.name, str) or not rule.name or not isinstance(rule.enabled, bool) or rule.route not in models or not isinstance(rule.condition, dict) or not rule.condition:
             raise ConfigError(f"invalid rule {rule.name}")
-        if set(rule.condition) - {"keywords", "prompt_chars"}:
+        if rule.source is not None and rule.source not in models:
+            raise ConfigError(f"invalid rule source {rule.source}")
+        if set(rule.condition) - {"keywords", "prompt_chars", "reason_codes"}:
             raise ConfigError(f"unsupported condition in {rule.name}")
         if "keywords" in rule.condition:
             keywords = rule.condition["keywords"]
             if not isinstance(keywords, dict) or set(keywords) != {"any"} or not isinstance(keywords["any"], list) or not keywords["any"] or not all(isinstance(k, str) and k for k in keywords["any"]):
                 raise ConfigError(f"invalid keywords condition in {rule.name}")
+        if "reason_codes" in rule.condition:
+            reasons = rule.condition["reason_codes"]
+            if not isinstance(reasons, dict) or set(reasons) != {"any"} or not isinstance(reasons["any"], list) or not reasons["any"] or not all(isinstance(k, str) and k for k in reasons["any"]):
+                raise ConfigError(f"invalid reason_codes condition in {rule.name}")
         if "prompt_chars" in rule.condition:
             comparisons = rule.condition["prompt_chars"]
             valid_ops = {"gt", "gte", "lt", "lte", "eq"}
@@ -129,13 +140,25 @@ def load_config(path: str | Path) -> RouterConfig:
                 raise ConfigError(f"invalid prompt_chars values in {rule.name}")
         rules.append(rule)
 
-    l1 = _need(raw, "l1")
-    if not isinstance(l1, dict):
-        raise ConfigError("l1 must be an object")
-    prompt = _need(l1, "routing_prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ConfigError("l1.routing_prompt must be non-empty")
-    threshold = l1.get("low_confidence_threshold", 0.0)
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
-        raise ConfigError("l1.low_confidence_threshold must be between 0 and 1")
-    return RouterConfig(ServerConfig(host, port), models, tuple(rules), default_route, prompt, float(threshold))
+    defaults = routing.get("escalation_defaults", {})
+    if not isinstance(defaults, dict) or any(source not in models or target not in models or source == target for source, target in defaults.items()):
+        raise ConfigError("invalid escalation_defaults")
+
+    logging_raw = raw.get("logging", {})
+    if not isinstance(logging_raw, dict):
+        raise ConfigError("logging must be an object")
+    level = str(logging_raw.get("level", "INFO")).upper()
+    if level not in {"ERROR", "WARNING", "INFO", "DEBUG", "TRACE"}:
+        raise ConfigError("logging.level must be ERROR, WARNING, INFO, DEBUG, or TRACE")
+    queue_size = logging_raw.get("queue_size", 4096)
+    if isinstance(queue_size, bool) or not isinstance(queue_size, int) or queue_size <= 0:
+        raise ConfigError("logging.queue_size must be > 0")
+    if not isinstance(logging_raw.get("console", True), bool) or not isinstance(logging_raw.get("include_content", False), bool):
+        raise ConfigError("logging.console/include_content must be boolean")
+    file = logging_raw.get("file")
+    if file is not None and not isinstance(file, str):
+        raise ConfigError("logging.file must be a string")
+
+    return RouterConfig(ServerConfig(host, port), models, tuple(rules), default_route,
+                        {str(k): str(v) for k, v in defaults.items()},
+                        LoggingConfig(level, logging_raw.get("console", True), file, queue_size, logging_raw.get("include_content", False)))
