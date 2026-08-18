@@ -1,6 +1,7 @@
 import logging
 import queue
 from logging.handlers import QueueHandler, QueueListener
+from pathlib import Path
 
 TRACE = 5
 logging.addLevelName(TRACE, "TRACE")
@@ -29,7 +30,9 @@ class AsyncLogger:
             handler.setFormatter(formatter)
             handlers.append(handler)
         if config.file:
-            handler = logging.FileHandler(config.file, encoding="utf-8")
+            path = Path(config.file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handler = logging.FileHandler(path, encoding="utf-8")
             handler.setFormatter(formatter)
             handlers.append(handler)
         self.handler = QueueHandler(self.queue)
