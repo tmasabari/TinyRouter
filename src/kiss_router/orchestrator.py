@@ -12,7 +12,7 @@ from .worker import ModelWorker
 class Orchestrator:
     def __init__(self, config: RouterConfig, client: ChatClient, logger=None):
         self.config, self.client, self.logger = config, client, logger
-        self.workers = {key: ModelWorker(client, model, model.capability_prompt) for key, model in config.models.items()}
+        self.workers = {key: ModelWorker(client, model) for key, model in config.models.items()}
         self.events = []
 
     async def handle(self, messages):
