@@ -84,7 +84,7 @@ def load_config(path: str | Path) -> RouterConfig:
                 "id", "name", "endpoint", "model", "timeout_seconds", "temperature", "max_tokens")})
         except (TypeError, ConfigError) as error:
             raise ConfigError(f"invalid model: {error}") from error
-        if model.id not in {"l1", "l2"} or model.id in models or not model.endpoint.startswith(("http://", "https://")):
+        if model.id not in {"l1", "l2", "l3"} or model.id in models or not model.endpoint.startswith(("http://", "https://")):
             raise ConfigError(f"invalid model {model.id}")
         _number(model.timeout_seconds, f"{model.id}.timeout_seconds", 0.001)
         if isinstance(model.max_tokens, bool) or not isinstance(model.max_tokens, int) or model.max_tokens <= 0:
@@ -92,8 +92,8 @@ def load_config(path: str | Path) -> RouterConfig:
         if isinstance(model.temperature, bool) or not isinstance(model.temperature, (int, float)) or model.temperature < 0:
             raise ConfigError(f"{model.id}.temperature must be >= 0")
         models[model.id] = model
-    if set(models) != {"l1", "l2"}:
-        raise ConfigError("models must contain exactly l1 and l2")
+    if not {"l1", "l2"}.issubset(models):
+        raise ConfigError("models must contain l1 and l2")
 
     routing = _need(raw, "routing")
     if not isinstance(routing, dict):
