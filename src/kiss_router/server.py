@@ -37,11 +37,7 @@ class Handler(BaseHTTPRequestHandler):
                     "completion_tokens": result.response.output_tokens or 0,
                     "total_tokens": (result.response.input_tokens or 0) + (result.response.output_tokens or 0),
                 },
-<<<<<<< HEAD
-            })
-=======
             }, result.event)
->>>>>>> origin/main
         except (ValueError, json.JSONDecodeError) as error:
             self._json(400, {"error": {"message": str(error), "type": "invalid_request_error"}})
         except Exception as error:
@@ -50,17 +46,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-<<<<<<< HEAD
-    def _json(self, status, payload):
-=======
     def _json(self, status, payload, event=None):
->>>>>>> origin/main
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
-<<<<<<< HEAD
-=======
         if event:
             self.send_header("X-TinyRouter-Route", event.route)
             self.send_header("X-TinyRouter-Source", event.source)
@@ -68,7 +58,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-TinyRouter-L1-Latency-Ms", str(event.l1_latency_ms))
             self.send_header("X-TinyRouter-Total-Latency-Ms", str(event.latency_ms))
             self.send_header("X-TinyRouter-Escalation", str(event.escalation).lower())
->>>>>>> origin/main
         self.end_headers()
         self.wfile.write(data)
 
