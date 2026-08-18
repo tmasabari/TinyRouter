@@ -109,6 +109,9 @@ def load_config(path: str | Path) -> RouterConfig:
     default_route = _need(routing, "default_route")
     if default_route not in models:
         raise ConfigError("invalid default_route")
+    max_hops = routing.get("max_hops", 3)
+    if isinstance(max_hops, bool) or not isinstance(max_hops, int) or not 1 <= max_hops <= 10:
+        raise ConfigError("max_hops must be between 1 and 10")
     raw_rules = routing.get("rules", [])
     if not isinstance(raw_rules, list):
         raise ConfigError("routing.rules must be an array")
@@ -123,14 +126,11 @@ def load_config(path: str | Path) -> RouterConfig:
             raise ConfigError(f"invalid rule source {rule.source}")
         if set(rule.condition) - {"keywords", "prompt_chars", "reason_codes"}:
             raise ConfigError(f"unsupported condition in {rule.name}")
-        if "keywords" in rule.condition:
-            keywords = rule.condition["keywords"]
-            if not isinstance(keywords, dict) or set(keywords) != {"any"} or not isinstance(keywords["any"], list) or not keywords["any"] or not all(isinstance(k, str) and k for k in keywords["any"]):
-                raise ConfigError(f"invalid keywords condition in {rule.name}")
-        if "reason_codes" in rule.condition:
-            reasons = rule.condition["reason_codes"]
-            if not isinstance(reasons, dict) or set(reasons) != {"any"} or not isinstance(reasons["any"], list) or not reasons["any"] or not all(isinstance(k, str) and k for k in reasons["any"]):
-                raise ConfigError(f"invalid reason_codes condition in {rule.name}")
+        for key in ("keywords", "reason_codes"):
+            if key in rule.condition:
+                value = rule.condition[key]
+                if not isinstance(value, dict) or set(value) != {"any"} or not isinstance(value["any"], list) or not value["any"] or not all(isinstance(x, str) and x for x in value["any"]):
+                    raise ConfigError(f"invalid {key} condition in {rule.name}")
         if "prompt_chars" in rule.condition:
             comparisons = rule.condition["prompt_chars"]
             valid_ops = {"gt", "gte", "lt", "lte", "eq"}
