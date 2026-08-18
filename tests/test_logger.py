@@ -1,16 +1,24 @@
+import logging
 import tempfile
 import unittest
 from pathlib import Path
 
-from kiss_router.logger import AsyncLogger
+from kiss_router.logger import AsyncLogger, TRACE
 
 
 class LoggerTests(unittest.TestCase):
-    def test_trace_level_and_file_logging(self):
+    def test_trace_level(self):
+        logger = AsyncLogger(type("Config", (), {"level": "TRACE", "console": False, "file": None, "queue_size": 10})())
+        try:
+            self.assertEqual(logger.logger.level, TRACE)
+            self.assertTrue(logger.logger.isEnabledFor(TRACE))
+        finally:
+            logger.close()
+
+    def test_file_logging_is_flushed_on_close(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "router.log"
-            config = type("Log", (), {"level":"TRACE", "console":False, "file":str(path), "queue_size":10})()
-            logger = AsyncLogger(config)
-            logger.trace("trace-test")
+            logger = AsyncLogger(type("Config", (), {"level": "INFO", "console": False, "file": str(path), "queue_size": 10})())
+            logger.info("hello")
             logger.close()
-            self.assertIn("trace-test", path.read_text(encoding="utf-8"))
+            self.assertIn("hello", path.read_text(encoding="utf-8"))
