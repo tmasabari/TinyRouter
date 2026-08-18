@@ -1,826 +1,372 @@
-# KISS Local AI Router POC — User Story & Design Context
+# TinyRouter — KISS Local AI Router POC Context
 
-**Project:** TinyRouter — KISS Local AI Agent Routing  
-**POC:** Rules Engine + L1 + L2  
-**Owner:** Sabarinathan  
-**Status:** Implemented POC baseline  
-**Updated:** 2026-08-18
-
----
+**Status:** capability-routing POC  
+**Date:** 2026-08-18
 
 ## 1. Objective
 
-Build the smallest useful local AI router that validates this hypothesis:
+Build the smallest useful local AI router where:
 
-> A cheap deterministic rules layer plus a fast Qwen 3.6 0.8B L1 can avoid unnecessary L2 inference while preserving useful response quality.
+- YAML rules decide which model runs next.
+- Each model only reports whether it can handle the request.
+- A model never selects another model or endpoint.
+- The user can explicitly override routing with `@l1`, `@l2`, or `@l3`.
+- Logging is configurable and asynchronous so model inference is never blocked by log I/O.
 
-The POC intentionally excludes L3/Pi, tools, RAG, MCP, databases, queues, embeddings, and complex rule DSLs.
+The design must follow **KISS, YAGNI, DRY, and POLA**.
 
-### Target flow
-
-```text
-                         USER REQUEST
-                              |
-                              v
-                       +--------------+
-                       | RULES ENGINE |
-                       +------+-------+
-                              |
-                    +---------+---------+
-                    |                   |
-                 L2 match            no match
-                    |                   |
-                    v                   v
-                   L2                  L1
-                                      |
-                              +-------+-------+
-                              |               |
-                           handles         escalates
-                              |               |
-                              v               v
-                           RESPONSE          L2
-```
-
-The critical property is that **Rules → L2 bypasses L1**, while **Rules → L1 requires only one L1 model call**.
-
----
-
-## 2. Fixed Model Decisions
-
-### L1 — Qwen 3.6 0.8B
-
-Role:
-
-- semantic routing;
-- simple request handling;
-- deciding whether L2 is required;
-- returning a constrained structured routing result plus an answer when it can handle the request.
-
-Previously measured benchmark observations:
-
-- prompt processing: approximately 562 tok/s;
-- generation: approximately 54 tok/s.
-
-These are observations, not contractual targets.
-
-### L2 — LFM2.5-8B-A1B
-
-Role:
-
-- medium-complexity reasoning;
-- requests explicitly classified as complex by deterministic rules;
-- requests escalated by L1.
-
-Both models are accessed through OpenAI-compatible `/v1/chat/completions` endpoints.
-
----
-
-## 3. Architecture Decisions
-
-### AD-001 — Deterministic rules come before L1
-
-The router first evaluates cheap deterministic signals:
-
-- configured keywords;
-- configured prompt character length conditions.
-
-If a rule routes to L2, **L1 is never called**.
-
-### AD-002 — First matching rule wins
-
-Rules are evaluated top-to-bottom. The first enabled rule that matches determines the route.
-
-Do not add a priority field until the POC demonstrates a real need for one.
-
-### AD-003 — YAML is the configuration boundary
-
-Routing behavior and model endpoints are configuration, not code.
-
-The router must never accept an endpoint selected by an LLM.
-
-### AD-004 — L1 is both router and lightweight worker
-
-The original implementation review exposed an important bug: treating L1 purely as a classifier and then calling L1 again for the answer caused two L1 calls.
-
-The corrected contract is:
+## 2. Architecture
 
 ```text
-Rules → L1 → simple answer
-Rules → L1 → L2
+                         USER
+                          |
+                   optional @lN
+                          |
+                          v
+                    ORCHESTRATOR
+                          |
+                  +-------+-------+
+                  |               |
+              override        automatic
+                  |               |
+                  v               v
+                 Lx          RULE ENGINE
+                                  |
+                                  v
+                                 L1
+                                  |
+                         +--------+--------+
+                         |                 |
+                     can_handle         escalate
+                         |                 |
+                         v                 v
+                      answer          RULE ENGINE
+                                           |
+                                           v
+                                          L2
+                                           |
+                                  +--------+--------+
+                                  |                 |
+                              can_handle        escalate
+                                  |                 |
+                                  v                 v
+                               answer             L3
 ```
 
-Therefore a simple request costs exactly one L1 inference.
+The important boundary is:
 
-### AD-005 — Shared model client
+> **Models report capability. Rules control routing.**
 
-L1 and L2 use the same `ChatClient` abstraction. Endpoint, model, timeout, temperature, and token limits are configuration.
+## 3. Model Capability Contract
 
-No llama.cpp-specific logic belongs in the router.
-
-### AD-006 — Standard library HTTP server
-
-The POC exposes an OpenAI-compatible router endpoint using Python's standard `http.server` implementation.
-
-No FastAPI, Flask, or other web framework is required for the experiment.
-
-### AD-007 — Fail closed toward L2
-
-L1 output is untrusted.
-
-Invalid JSON, invalid route data, or insufficient confidence must not block a request. The POC performs one constrained retry and then escalates to L2.
-
-### AD-008 — Failures are observable
-
-Model failures must produce telemetry rather than silently disappearing. The final request result may still raise an upstream error, but the routing event records failure status and latency.
-
----
-
-## 4. User Stories and Acceptance Criteria
-
-### US-POC-001 — Configurable Rules Engine
-
-As a system designer, I want routing rules defined in YAML so that routing behavior can change without code changes.
-
-Acceptance:
-
-- YAML is loaded at startup.
-- Invalid configuration fails fast.
-- Rules can be enabled/disabled.
-- Keyword and prompt-character conditions are supported.
-- Routes are limited to `l1` and `l2`.
-- Rule order is deterministic.
-- First matching rule wins.
-
-### US-POC-002 — Keyword Routing
-
-Case-insensitive keyword matching can route obvious complex requests directly to L2.
-
-Example:
-
-```yaml
-- name: coding
-  enabled: true
-  condition:
-    keywords:
-      any:
-        - implement
-        - refactor
-        - debug
-  route: l2
-```
-
-### US-POC-003 — Prompt Length Routing
-
-Prompt character count is configurable.
-
-Example:
-
-```yaml
-condition:
-  prompt_chars:
-    gt: 5000
-```
-
-The threshold is a hypothesis and must be benchmarked rather than treated as a universal value.
-
-### US-POC-004 — L1 Semantic Routing
-
-L1 returns a constrained decision:
+Every automatic model invocation uses the same contract:
 
 ```json
-{
-  "route": "l1",
-  "confidence": 0.96,
-  "reason_code": "simple_question",
-  "answer": "..."
-}
+{"status":"can_handle","reason_code":"simple_question","answer":"complete user-facing answer"}
 ```
 
 or:
 
 ```json
-{
-  "route": "l2",
-  "confidence": 0.91,
-  "reason_code": "complex_reasoning"
-}
+{"status":"escalate","reason_code":"complex_reasoning","answer":""}
 ```
 
-L1 may select only `l1` or `l2`. It cannot select endpoints.
+Rules:
 
-### US-POC-005 — L2 Invocation
+- `status` is `can_handle` or `escalate`.
+- `reason_code` is a short machine-readable reason.
+- `can_handle` requires a non-empty answer.
+- `escalate` never exposes an answer to the user.
+- Model-generated confidence is intentionally not part of the contract.
 
-L2 can be reached through either:
+### Why no confidence?
+
+Testing showed that small local models can produce high confidence for wrong answers. A generated `0.92` is not a calibrated probability. Routing therefore uses deterministic rules and explicit capability status instead.
+
+## 4. Routing Priority
 
 ```text
-Rules → L2
+1. User override
+2. Initial YAML rules
+3. Default route
+4. Model capability response
+5. YAML escalation rules
+6. Per-model escalation default
+7. Maximum-hop/cycle protection
 ```
 
-or:
+### User override
 
 ```text
-Rules → L1 → L2
+@l1 question
+@l2 question
+@l3 question
 ```
 
-### US-POC-006 — Common OpenAI-Compatible Interface
+The marker is removed before inference. An explicit override directly invokes that model and bypasses capability routing.
 
-The router exposes:
+### Automatic routing
+
+Example:
 
 ```text
-POST /v1/chat/completions
+Rules -> L1
+          |
+          +-- can_handle -> answer
+          |
+          +-- escalate(complex_reasoning)
+                    |
+                    v
+                 Rule Engine
+                    |
+                    v
+                   L2
 ```
 
-and internally calls configured model endpoints using the same API contract.
+## 5. Rule Engine
 
-### US-POC-007 — Observable Routing
-
-Routing events record:
-
-- request ID;
-- final route;
-- routing source;
-- matched rule;
-- final model;
-- L1 latency/tokens when L1 ran;
-- total latency;
-- input characters/tokens where available;
-- output tokens where available;
-- confidence;
-- success/failure;
-- escalation.
-
----
-
-## 5. YAML Configuration
-
-Current configuration shape:
-
-```yaml
-version: 1
-
-server:
-  host: 127.0.0.1
-  port: 8090
-
-models:
-  - id: l1
-    name: qwen3.6-0.8b
-    endpoint: http://127.0.0.1:8081/v1
-    model: qwen3.6-0.8b
-    role: router
-    timeout_seconds: 10
-    temperature: 0.0
-    max_tokens: 256
-
-  - id: l2
-    name: lfm2.5-8b-a1b
-    endpoint: http://127.0.0.1:8082/v1
-    model: lfm2.5-8b-a1b
-    role: worker
-    timeout_seconds: 60
-    temperature: 0.2
-    max_tokens: 2048
-
-routing:
-  rules:
-    - name: long_prompt
-      enabled: true
-      condition:
-        prompt_chars:
-          gt: 5000
-      route: l2
-
-    - name: coding
-      enabled: true
-      condition:
-        keywords:
-          any:
-            - implement
-            - refactor
-            - debug
-            - repository
-            - source code
-      route: l2
-
-    - name: architecture
-      enabled: true
-      condition:
-        keywords:
-          any:
-            - architecture
-            - system design
-      route: l2
-
-  default_route: l1
-
-l1:
-  routing_prompt: |
-    Classify the user request.
-    Decide whether L1 can answer it or L2 is required.
-    Return ONLY valid JSON with route, confidence, reason_code,
-    and answer when route is l1.
-
-  low_confidence_threshold: 0.70
-```
-
-Supported prompt-length operators are intentionally limited to:
-
-```text
-gt
-gte
-lt
-lte
-eq
-```
-
-Unsupported operators and malformed rule structures fail configuration validation instead of silently behaving as non-matches.
-
----
-
-## 6. Rule Engine Contract
-
-The rules engine remains deliberately dumb.
-
-```python
-def evaluate(prompt, rules, default_route):
-    for rule in rules:
-        if rule.enabled and matches(rule.condition, prompt):
-            return RouteDecision(rule.route, "rules", rule.name)
-    return RouteDecision(default_route, "default")
-```
+The rule engine is deliberately small.
 
 Supported conditions:
 
-1. `keywords.any` — case-insensitive substring matching.
-2. `prompt_chars` — numeric comparison.
+- `keywords.any`
+- `prompt_chars` using `gt`, `gte`, `lt`, `lte`, `eq`
+- `reason_codes.any`
 
-Do not implement:
+Rules are evaluated top-to-bottom. The first enabled matching rule wins.
 
-- embedded Python;
-- arbitrary expressions;
-- scripting;
-- database-backed rules;
-- complex boolean DSL;
-- rule priorities unless required by evidence.
+A rule can optionally specify `source` so capability escalation rules only apply to the intended model.
 
-Substring matching is intentionally a heuristic. For the POC, correctness should be evaluated empirically before introducing regex or NLP-based rule matching.
+Example:
 
----
-
-## 7. L1 Contract
-
-L1 receives the request messages through the shared model client.
-
-The system prompt asks Qwen 3.6 0.8B to return JSON only.
-
-For an L1-handled request:
-
-```json
-{
-  "route": "l1",
-  "confidence": 0.95,
-  "reason_code": "simple_question",
-  "answer": "Dependency injection is..."
-}
+```yaml
+- name: l1_complex
+  enabled: true
+  source: l1
+  condition:
+    reason_codes:
+      any: [complex_reasoning, insufficient_capability]
+  route: l2
 ```
 
-For escalation:
+Do not add regex, scripting, database-backed rules, arbitrary expressions, priorities, or a complex DSL unless benchmark evidence requires them.
 
-```json
-{
-  "route": "l2",
-  "confidence": 0.88,
-  "reason_code": "complex_reasoning"
-}
+## 6. Escalation Defaults
+
+YAML provides a simple fallback chain:
+
+```yaml
+routing:
+  escalation_defaults:
+    l1: l2
+    l2: l3
 ```
 
-Validation rules:
+This means a model can safely return `escalate` even when no specific reason-code rule exists.
 
-- route must be `l1` or `l2`;
-- confidence must be numeric and between 0 and 1;
-- reason code must be a string;
-- an `l1` decision must contain a non-empty answer.
+The router rejects:
 
-### Low confidence
+- missing escalation target;
+- same-model escalation;
+- routing cycles;
+- more than `max_hops`.
 
-If:
+Default:
+
+```yaml
+routing:
+  max_hops: 3
+```
+
+## 7. Current Example Models
+
+The sample configuration supports:
 
 ```text
-route = l1
-confidence < configured threshold
+L1 -> LFM2.5-1.2B
+L2 -> LFM2.5-8B-A1B
+L3 -> Qwen3.6-35B-A3B
 ```
 
-the orchestrator changes the decision to L2.
+Endpoints remain OpenAI-compatible `/v1/chat/completions` endpoints and are configured in YAML.
 
-### Invalid output
+Model names are configuration metadata; the router contains no llama.cpp-specific code.
+
+## 8. Model Worker
+
+`ModelWorker` is the single model-capability abstraction.
+
+It:
+
+1. adds the model's capability prompt;
+2. calls the shared `ChatClient`;
+3. parses the capability JSON;
+4. validates the response;
+5. returns `CapabilityResult`.
+
+There is no `L1Router`, `L2Router`, or `L3Router` implementation.
+
+This keeps the architecture DRY and makes adding another layer a configuration change rather than another routing class.
+
+## 9. Logging
+
+Logging uses Python's standard `QueueHandler` + `QueueListener`.
 
 ```text
-L1
- |
- | invalid JSON
- v
-retry once
- |
- +---- valid ---> continue
- |
- +---- invalid -> L2
+request thread
+     |
+     v
+QueueHandler -> bounded queue -> QueueListener -> console/file
 ```
 
-The router never attempts to infer intent from malformed natural-language output.
+The request path only enqueues a log record. Console/file I/O runs on the listener thread.
 
----
-
-## 8. Corrected Orchestration Contract
-
-The implementation must follow this behavior:
-
-```python
-async def handle(messages):
-    prompt = extract_user_prompt(messages)
-    decision = evaluate(prompt, rules, "l1")
-
-    if decision.route == "l2":
-        return await l2.chat(messages)
-
-    l1_result = await l1.route(messages)
-
-    if l1_result.route == "l1":
-        return l1_result.answer
-
-    return await l2.chat(messages)
-```
-
-The important performance property is:
+Supported levels:
 
 ```text
-simple request:
-Rules → one L1 call → response
-
-complex rule:
-Rules → one L2 call → response
-
-L1 escalation:
-Rules → one L1 call → one L2 call → response
+ERROR
+WARNING
+INFO
+DEBUG
+TRACE
 ```
 
-There must never be an unnecessary second L1 inference for a simple request.
+`TRACE` is a small custom level below `DEBUG`.
 
----
+YAML:
 
-## 9. OpenAI-Compatible Router API
+```yaml
+logging:
+  level: INFO
+  console: true
+  file: logs/tinyrouter.log
+  queue_size: 4096
+  include_content: false
+```
 
-The POC exposes:
+`include_content` defaults to false. Prompts and model responses must not be logged by default.
+
+The logger is stopped during server shutdown so queued records are flushed.
+
+## 10. Telemetry
+
+Every request gets a `request_id`.
+
+A `RoutingEvent` records:
+
+- request ID;
+- final route;
+- source;
+- matched rule;
+- model;
+- total latency;
+- prompt character count;
+- input/output token counts when available;
+- success/failure;
+- escalation;
+- hop count;
+- error text on failure.
+
+The event remains in memory for the POC. No database or telemetry platform is required.
+
+## 11. OpenAI-Compatible API
 
 ```text
 POST /v1/chat/completions
 ```
 
-Example request:
+The router does not trust a client-supplied physical endpoint. The `model` field is only API compatibility; routing is controlled by override markers and YAML.
 
-```json
-{
-  "model": "router",
-  "messages": [
-    {"role": "user", "content": "What is dependency injection?"}
-  ]
-}
-```
+The response remains compatible with normal OpenAI-style clients.
 
-The router ignores client-selected physical endpoints. Model routing is controlled by YAML.
+## 12. Failure Behavior
 
-Example response shape:
-
-```json
-{
-  "id": "chatcmpl-...",
-  "object": "chat.completion",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "..."
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "model": "qwen3.6-0.8b",
-  "usage": {
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "total_tokens": 0
-  }
-}
-```
-
-Token counts remain zero when the underlying inference server does not provide usage data.
-
----
-
-## 10. Telemetry Model
-
-A `RoutingEvent` captures routing evidence for the POC.
-
-Important distinction:
+### Invalid user request
 
 ```text
-L1 latency/tokens = routing overhead
-Total latency     = user-visible request cost
-L2 latency/tokens = worker cost when escalation occurs
+HTTP 400
 ```
 
-This allows the experiment to answer whether L1 routing actually saves cost/latency.
+### Model/transport failure
 
-Failures should still create an event with `success=false` before the exception is returned to the API layer.
+```text
+HTTP 502
+```
 
-The current POC keeps events in memory. Do not add a database or distributed telemetry stack yet.
+### Invalid capability JSON
 
----
+The current POC treats it as a model failure rather than trying to infer meaning from arbitrary natural language.
 
-## 11. Configuration Validation
+### Routing cycle
 
-Startup validation must reject:
+Fail immediately.
 
-- missing `version` or unsupported version;
-- missing models;
-- duplicate model IDs;
-- anything other than exactly `l1` and `l2` models;
-- invalid endpoint schemes;
-- invalid model numeric settings;
-- invalid default routes;
-- invalid rule routes;
-- unsupported condition keys;
-- malformed keyword conditions;
-- malformed prompt-length comparisons;
-- unsupported prompt-length operators;
-- invalid L1 confidence threshold;
-- missing/empty L1 routing prompt.
+### Maximum hops exceeded
 
-The objective is fail-fast behavior rather than silently accepting a broken router configuration.
+Fail immediately.
 
----
-
-## 12. HTTP Failure Handling
-
-The standard-library client must surface upstream failures as router failures.
-
-The API layer maps an upstream model failure to HTTP 502.
-
-Client validation failures map to HTTP 400.
-
-The POC does not add sophisticated retry policies for model availability. L1 has only its constrained JSON-output retry; transport retries are intentionally out of scope.
-
----
+The POC intentionally does not add generic transport retries or circuit breakers yet.
 
 ## 13. Tests
 
-The test suite should verify at minimum:
+Tests must cover:
 
-### Rules
+- configuration validation;
+- rule ordering;
+- case-insensitive keywords;
+- prompt length boundaries;
+- reason-code/source routing;
+- model capability parsing;
+- `can_handle` answer validation;
+- escalation;
+- L1 -> L2 -> L3;
+- user overrides;
+- unknown overrides;
+- cycle protection;
+- failed-request telemetry.
 
-- disabled rule is skipped;
-- first enabled matching rule wins;
-- keyword matching is case-insensitive;
-- prompt length boundaries are correct;
-- all supported comparison operators work;
-- invalid operators/configuration fail fast.
+The benchmark remains separate from unit tests.
 
-### Orchestration
+## 14. Benchmark Goal
 
-- rule → L2 bypasses L1;
-- simple request → exactly one L1 call;
-- L1 → L2 performs exactly one L1 and one L2 call;
-- low-confidence L1 escalates;
-- malformed L1 output retries once;
-- repeated malformed L1 output falls back to L2;
-- model failure records failed telemetry.
-
-### API
-
-- invalid JSON/request returns 400;
-- valid chat completion returns OpenAI-compatible shape;
-- upstream failure returns 502.
-
----
-
-## 14. Repository Structure
+The benchmark must compare:
 
 ```text
-TinyRouter/
-├── config/
-│   └── router.yaml
-├── docs/
-│   ├── kiss_local_ai_router_poc_context.md
-│   └── ...
-├── src/
-│   └── kiss_router/
-│       ├── client.py
-│       ├── config.py
-│       ├── l1.py
-│       ├── models.py
-│       ├── orchestrator.py
-│       ├── rules.py
-│       └── server.py
-├── tests/
-│   ├── test_config.py
-│   ├── test_orchestrator.py
-│   └── test_rules.py
-├── pyproject.toml
-└── README.md
-```
-
-The implementation intentionally remains small. A new abstraction or dependency requires a demonstrated POC need.
-
----
-
-## 15. Running the POC
-
-Install in an isolated Python environment:
-
-```bash
-python -m venv .venv
-# activate the environment
-pip install -e .
-```
-
-Run tests:
-
-```bash
-python -m pytest
-```
-
-Start the router:
-
-```bash
-tiny-router --config config/router.yaml
-```
-
-or:
-
-```bash
-python -m kiss_router.server --config config/router.yaml
-```
-
-Default router endpoint:
-
-```text
-http://127.0.0.1:8090/v1/chat/completions
-```
-
-The configured L1 and L2 inference servers must already expose their own OpenAI-compatible `/v1/chat/completions` endpoints.
-
----
-
-## 16. Example Routing Paths
-
-### Simple request
-
-```text
-"What is dependency injection?"
-
-Rules
-  ↓ no match
-L1 / Qwen 0.8B
-  ↓ route=l1
-response
-```
-
-### Obvious coding request
-
-```text
-"Refactor this repository's authentication implementation"
-
-Rules
-  ↓ coding match
-L2 / LFM2.5-8B-A1B
-```
-
-### Long request
-
-```text
-prompt > configured threshold
-
-Rules
-  ↓ long_prompt
-L2
-```
-
-### Ambiguous/complex request
-
-```text
-Rules
-  ↓ no match
-L1
-  ↓ route=l2
-L2
-```
-
-### Invalid L1 output
-
-```text
-Rules
-  ↓
-L1
-  ↓ invalid JSON
-L1 retry
-  ↓ invalid again
-L2
-```
-
----
-
-## 17. Review Findings and Resolutions
-
-The first Codex-generated implementation was reviewed against this design. The following issues were found and corrected.
-
-### Finding 1 — Double L1 invocation
-
-**Problem:** L1 classified a request and then the orchestrator invoked L1 again to produce the answer.
-
-**Impact:** Simple requests paid for two L1 calls, invalidating the intended cost/latency experiment.
-
-**Resolution:** L1 now returns an answer when it selects `l1`; the orchestrator returns it directly.
-
-### Finding 2 — Incomplete telemetry
-
-**Problem:** A single latency/token pair represented only the final model call.
-
-**Impact:** L1 routing overhead could not be measured separately.
-
-**Resolution:** Routing events distinguish L1 routing metrics from total request latency and record escalation.
-
-### Finding 3 — Hard-coded success
-
-**Problem:** Successful telemetry was constructed with `success=True` and failures were not recorded.
-
-**Resolution:** Model-call failures are recorded with `success=False` before being surfaced.
-
-### Finding 4 — Weak configuration validation
-
-**Problem:** Unsupported prompt-length operators could silently become non-matches.
-
-**Resolution:** Supported operators and condition structure are validated at startup.
-
-### Finding 5 — Missing router API
-
-**Problem:** The library implemented orchestration but did not expose the specified ChatGPT-style router endpoint.
-
-**Resolution:** Added a minimal standard-library HTTP server exposing `/v1/chat/completions`.
-
-### Finding 6 — Insufficient tests
-
-**Problem:** Existing tests covered only the main routing paths.
-
-**Resolution:** Added configuration and orchestration tests for the corrected contracts, including direct L1 handling, escalation, invalid output, and validation behavior.
-
----
-
-## 18. POC Non-Goals
-
-Do not add these until benchmark evidence justifies them:
-
-- L3/Pi routing;
-- RAG;
-- MCP;
-- tool execution;
-- embeddings/vector search;
-- semantic rule matching;
-- dynamic rule editing API;
-- database-backed telemetry;
-- distributed tracing;
-- model load balancing;
-- circuit breakers;
-- complex retry policies;
-- rule priority/weighting;
-- agent loops.
-
-KISS/YAGNI is an explicit design constraint, not a temporary lack of features.
-
----
-
-## 19. Next Experiment
-
-The next useful work is measurement, not architecture.
-
-Benchmark the same request set through:
-
-```text
-Baseline:
-Request → L2
-
-Router:
-Request → Rules → L1/L2
+Direct L2 baseline
+        vs
+Rules -> L1 -> optional escalation
 ```
 
 Measure:
 
-- percentage routed directly to L2 by rules;
-- percentage handled by L1;
-- percentage escalated from L1 to L2;
+- L1 calls;
+- L2 calls;
+- L3 calls;
+- L2 calls avoided;
 - L1 routing latency;
 - total latency;
-- L2 calls avoided;
-- token consumption where available;
-- answer quality/error rate.
+- escalation rate;
+- model failure rate;
+- capability/routing errors.
 
-The POC succeeds only if the additional routing cost is outweighed by avoided L2 work without unacceptable quality loss.
+The goal is not maximum L1 usage. The goal is:
+
+> **reduce expensive-model calls without materially reducing answer quality.**
+
+## 15. Explicitly Out of Scope
+
+Do not add yet:
+
+- RAG;
+- MCP;
+- embeddings/vector databases;
+- Redis/database state;
+- distributed tracing;
+- service discovery;
+- Kubernetes;
+- complex rule DSL;
+- LLM-as-judge;
+- automatic model downloading;
+- cloud provider integrations.
+
+These violate the POC's KISS/YAGNI objective until measured evidence justifies them.
