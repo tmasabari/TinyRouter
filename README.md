@@ -110,7 +110,6 @@ logging:
   console: true
   file: logs/tinyrouter.log
   queue_size: 4096
-  include_content: false
 ```
 
 Logging is intentionally non-blocking for normal request execution. Prompt/response content is not logged by default.
@@ -164,7 +163,7 @@ tiny-router --config config/router.yaml
 python -m pytest -v
 ```
 
-Tests cover configuration, rules, capability parsing, escalation, L1 → L2 → L3, overrides, cycle protection, and failure telemetry.
+Tests cover configuration, rules, capability parsing, async logging, escalation, L1 → L2 → L3, overrides, cycle protection, and failure telemetry.
 
 ## Benchmark
 
