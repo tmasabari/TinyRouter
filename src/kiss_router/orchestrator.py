@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from .client import ChatClient
 from .config import RouterConfig
-from .models import HandleResult, RouteDecision, RoutingEvent
+from .models import ChatResult, HandleResult, RouteDecision, RoutingEvent
 from .rules import evaluate
 from .worker import ModelWorker
 
@@ -21,41 +21,38 @@ class Orchestrator:
         if not prompt:
             raise ValueError("a user message is required")
         request_id, started = str(uuid4()), time.perf_counter()
-        if override:
-            result = await self.client.chat(self.config.models[override], messages)
-            decision = RouteDecision(override, "user_override")
-            return self._finish(request_id, decision, result, prompt, started, 1)
-
-        decision = evaluate(prompt, self.config.rules, self.config.default_route)
-        visited = set()
-        for hop in range(self.config.max_hops):
-            route = decision.route
-            if route in visited:
-                raise RuntimeError(f"routing cycle detected at {route}")
-            visited.add(route)
-            worker = self.workers[route]
-            self.logger.debug("request=%s hop=%d model=%s source=%s", request_id, hop, route, decision.source) if self.logger else None
-            try:
-                capability = await worker.invoke(messages)
-            except Exception as error:
-                self.logger.error("request=%s model=%s error=%s", request_id, route, error) if self.logger else None
-                raise
-            if capability.can_handle:
-                result = capability.result
-                result = type(result)(capability.answer, result.model, result.input_tokens, result.output_tokens, result.latency_ms)
-                return self._finish(request_id, RouteDecision(route, decision.source, decision.rule, capability.reason_code), result, prompt, started, hop + 1)
-            next_decision = evaluate(prompt, self.config.rules, self.config.escalation_defaults.get(route, ""), route, capability.reason_code)
-            if not next_decision.route or next_decision.route == route:
-                raise RuntimeError(f"no escalation route configured for {route}: {capability.reason_code}")
-            decision = next_decision
-
-        raise RuntimeError(f"maximum routing hops exceeded ({self.config.max_hops})")
+        try:
+            if override:
+                response = await self.client.chat(self.config.models[override], messages)
+                return self._finish(request_id, RouteDecision(override, "user_override"), response, prompt, started, 1)
+            decision = evaluate(prompt, self.config.rules, self.config.default_route)
+            visited = set()
+            for hop in range(self.config.max_hops):
+                route = decision.route
+                if route in visited:
+                    raise RuntimeError(f"routing cycle detected at {route}")
+                visited.add(route)
+                capability = await self.workers[route].invoke(messages)
+                if capability.can_handle:
+                    result = capability.result
+                    response = ChatResult(capability.answer, result.model, result.input_tokens, result.output_tokens, result.latency_ms)
+                    return self._finish(request_id, RouteDecision(route, decision.source, decision.rule, capability.reason_code), response, prompt, started, hop + 1)
+                decision = evaluate(prompt, self.config.rules, self.config.escalation_defaults.get(route, ""), route, capability.reason_code)
+                if decision.route in visited or not decision.route:
+                    raise RuntimeError(f"no valid escalation route for {route}: {capability.reason_code}")
+            raise RuntimeError(f"maximum routing hops exceeded ({self.config.max_hops})")
+        except Exception as error:
+            self.events.append(RoutingEvent(request_id, locals().get("decision", override or "unknown"), "error", None,
+                                             locals().get("route", override or "unknown"), round((time.perf_counter() - started) * 1000),
+                                             len(prompt), None, None, False, False, locals().get("hop", 0) + 1, str(error)))
+            if self.logger:
+                self.logger.error("request=%s error=%s", request_id, error)
+            raise
 
     def _finish(self, request_id, decision, response, prompt, started, hops):
         event = RoutingEvent(request_id, decision.route, decision.source, decision.rule, response.model,
                              round((time.perf_counter() - started) * 1000), len(prompt),
-                             response.input_tokens, response.output_tokens, True,
-                             hops > 1, hops=hops)
+                             response.input_tokens, response.output_tokens, True, hops > 1, hops=hops)
         self.events.append(event)
         if self.logger:
             self.logger.info("request=%s route=%s model=%s hops=%d latency_ms=%d", request_id, decision.route, response.model, hops, event.latency_ms)
