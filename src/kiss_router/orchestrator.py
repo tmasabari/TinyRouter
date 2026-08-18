@@ -1,10 +1,11 @@
+import re
 import time
 from uuid import uuid4
 
 from .client import ChatClient
 from .config import RouterConfig
 from .l1 import L1Router
-from .models import HandleResult, RoutingEvent
+from .models import HandleResult, RoutingEvent, RouteDecision
 from .rules import evaluate
 
 
@@ -15,11 +16,12 @@ class Orchestrator:
         self.events: list[RoutingEvent] = []
 
     async def handle(self, messages: list[dict[str, str]]) -> HandleResult:
+        messages, override = self._model_override(messages)
         prompt = "\n".join(message["content"] for message in messages if message.get("role") == "user")
         if not prompt:
             raise ValueError("a user message is required")
         started, request_id = time.perf_counter(), str(uuid4())
-        decision = evaluate(prompt, self.config.rules, self.config.default_route)
+        decision = RouteDecision(override, "user_override") if override else evaluate(prompt, self.config.rules, self.config.default_route)
         l1_result = None
         l1_latency = 0
         target = self.config.models[decision.route]
@@ -38,6 +40,21 @@ class Orchestrator:
             event = self._event(request_id, decision, target.name, None, prompt, started, l1_result, l1_latency, str(exc))
             self.events.append(event)
             raise
+
+    def _model_override(self, messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], str | None]:
+        for index, message in enumerate(messages):
+            if message.get("role") != "user":
+                continue
+            match = re.match(r"^@(l[123])(?:\s+|$)", message["content"], re.IGNORECASE)
+            if not match:
+                return messages, None
+            route = match.group(1).lower()
+            if route not in self.config.models:
+                raise ValueError(f"model override {route} is not configured")
+            updated = [dict(item) for item in messages]
+            updated[index]["content"] = message["content"][match.end():].lstrip()
+            return updated, route
+        return messages, None
 
     @staticmethod
     def _event(request_id, decision, model, response, prompt, started, l1_result, l1_latency, error=None):
