@@ -6,7 +6,6 @@ class RouteDecision:
     route: str
     source: str
     rule: str | None = None
-    confidence: float | None = None
     reason_code: str | None = None
 
 
@@ -20,6 +19,14 @@ class ChatResult:
 
 
 @dataclass(frozen=True)
+class CapabilityResult:
+    can_handle: bool
+    reason_code: str
+    answer: str
+    result: ChatResult
+
+
+@dataclass(frozen=True)
 class RoutingEvent:
     request_id: str
     route: str
@@ -30,12 +37,9 @@ class RoutingEvent:
     input_chars: int
     input_tokens: int | None
     output_tokens: int | None
-    confidence: float | None
     success: bool
     escalation: bool
-    l1_latency_ms: int = 0
-    l1_input_tokens: int | None = None
-    l1_output_tokens: int | None = None
+    hops: int = 0
     error: str | None = None
 
 
