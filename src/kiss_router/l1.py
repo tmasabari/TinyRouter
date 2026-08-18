@@ -19,12 +19,12 @@ class L1Router:
                 route, confidence, reason = data["route"], data["confidence"], data["reason_code"]
                 if route not in {"l1", "l2"} or not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or not 0 <= confidence <= 1 or not isinstance(reason, str):
                     raise ValueError("invalid routing response")
+                if confidence < self.low_confidence_threshold:
+                    return RouteDecision("l2", "l1_low_confidence", confidence=float(confidence), reason_code=reason), result
                 if route == "l1":
                     answer = data.get("answer")
                     if not isinstance(answer, str) or not answer.strip():
                         raise ValueError("l1 response requires answer")
-                    if confidence < self.low_confidence_threshold:
-                        return RouteDecision("l2", "l1_low_confidence", confidence=float(confidence), reason_code=reason), result
                     return RouteDecision("l1", "l1", confidence=float(confidence), reason_code=reason), ChatResult(answer, result.model, result.input_tokens, result.output_tokens, result.latency_ms)
                 return RouteDecision("l2", "l1", confidence=float(confidence), reason_code=reason), result
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
