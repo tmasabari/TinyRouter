@@ -40,7 +40,6 @@ class LoggingConfig:
     console: bool = True
     file: str | None = None
     queue_size: int = 4096
-    include_content: bool = False
 
 
 @dataclass(frozen=True)
@@ -84,11 +83,8 @@ def load_config(path: str | Path) -> RouterConfig:
     for item in raw_models:
         if not isinstance(item, dict):
             raise ConfigError("invalid model")
-        try:
-            model = ModelConfig(**{key: _need(item, key) for key in (
-                "id", "name", "endpoint", "model", "capability_prompt", "timeout_seconds", "temperature", "max_tokens")})
-        except (TypeError, ConfigError) as error:
-            raise ConfigError(f"invalid model: {error}") from error
+        model = ModelConfig(**{key: _need(item, key) for key in (
+            "id", "name", "endpoint", "model", "capability_prompt", "timeout_seconds", "temperature", "max_tokens")})
         if not isinstance(model.id, str) or not model.id.startswith("l") or not model.id[1:].isdigit() or model.id in models or not model.endpoint.startswith(("http://", "https://")):
             raise ConfigError(f"invalid model {model.id}")
         if not isinstance(model.capability_prompt, str) or not model.capability_prompt.strip():
@@ -153,12 +149,12 @@ def load_config(path: str | Path) -> RouterConfig:
     queue_size = logging_raw.get("queue_size", 4096)
     if isinstance(queue_size, bool) or not isinstance(queue_size, int) or queue_size <= 0:
         raise ConfigError("logging.queue_size must be > 0")
-    if not isinstance(logging_raw.get("console", True), bool) or not isinstance(logging_raw.get("include_content", False), bool):
-        raise ConfigError("logging.console/include_content must be boolean")
+    if not isinstance(logging_raw.get("console", True), bool):
+        raise ConfigError("logging.console must be boolean")
     file = logging_raw.get("file")
     if file is not None and not isinstance(file, str):
         raise ConfigError("logging.file must be a string")
 
     return RouterConfig(ServerConfig(host, port), models, tuple(rules), default_route,
                         {str(k): str(v) for k, v in defaults.items()},
-                        LoggingConfig(level, logging_raw.get("console", True), file, queue_size, logging_raw.get("include_content", False)))
+                        LoggingConfig(level, logging_raw.get("console", True), file, queue_size))
