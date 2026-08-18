@@ -1,76 +1,113 @@
 # TinyRouter
 
-A deliberately small local AI router for testing **Rules → L1 → L2** model routing.
+A deliberately small local AI router for testing **Rules → L1 → L2/L3** routing.
 
-The goal is not to build another agent framework. The goal is to measure whether a cheap deterministic rules layer and a fast 0.8B model can avoid unnecessary calls to a larger local model.
+The POC answers one question: can cheap deterministic routing plus a small local L1 avoid unnecessary calls to larger models without unacceptable quality loss?
 
 ## Architecture
 
 ```text
                          USER REQUEST
                               |
-                              v
-                       +--------------+
-                       | RULES ENGINE |
-                       +------+-------+
-                              |
-                    +---------+---------+
-                    |                   |
-                 L2 match            no match
-                    |                   |
-                    v                   v
-                   L2                  L1
+                     +--------+--------+
+                     |                 |
+                @l2 / @l3         no override
+                     |                 |
+                     v                 v
+                  TARGET          RULES ENGINE
                                       |
                               +-------+-------+
                               |               |
-                           handles         escalates
-                              |               |
-                              v               v
-                           RESPONSE          L2
+                             L2              L1
+                                             |
+                                      +------+------+
+                                      |             |
+                                    answer         L2
 ```
 
-### Models
+User model markers have highest priority. Without a marker, YAML rules run first. L1 may answer the request or escalate to L2.
 
-| Layer | Model | Purpose |
-|---|---|---|
-| L1 | Qwen 3.6 0.8B | Fast routing + simple requests |
-| L2 | LFM2.5-8B-A1B | Medium-complexity reasoning |
+## Model Layers
 
-Both model servers use an OpenAI-compatible `/v1/chat/completions` API.
+| Layer | Purpose |
+|---|---|
+| L1 | Fast local model; routing + simple answers |
+| L2 | Larger local model for medium/complex requests |
+| L3 | Largest/strongest local model; direct user override in this POC |
 
-## Why TinyRouter?
+All model servers use an OpenAI-compatible `/v1/chat/completions` API.
 
-Sending every request to L2 is wasteful.
+## User Model Override
 
-TinyRouter first checks cheap deterministic signals:
+A user can bypass rules and L1 by putting a marker at the **start of the first user message**:
 
-- configured keywords;
-- prompt character length;
-- rule order.
+```text
+@l2 Explain this architecture.
+```
 
-This gives three useful paths:
+or:
+
+```text
+@l3 Design the production system in detail.
+```
+
+TinyRouter removes the marker before sending the prompt to the selected model.
+
+Supported markers:
+
+```text
+@l2 → configured L2 model
+@l3 → configured L3 model
+```
+
+The marker is a routing control, not model-generated content. It is deterministic and has priority over YAML rules and L1.
+
+If the selected layer is not configured, the request fails with a client error.
+
+A normal request still follows:
 
 ```text
 Rules → L2
-Rules → L1
+Rules → L1 → answer
 Rules → L1 → L2
 ```
 
-A simple request requires **one L1 inference**, not two. This was an important correction made during review of the first POC implementation.
+A simple request requires **one L1 inference**, not two.
 
 ## Configuration
 
-Routing is YAML-based.
+Routing is YAML-based. `config/router.yaml` defines the router, model endpoints, rules, and L1 prompt.
 
-`config/router.yaml` defines:
+Example model configuration:
 
-- router host/port;
-- L1 endpoint/model/settings;
-- L2 endpoint/model/settings;
-- routing rules;
-- L1 confidence threshold.
+```yaml
+models:
+  - id: l1
+    name: lfm2.5-1.2b
+    endpoint: http://127.0.0.1:8081/v1
+    model: lfm2.5-1.2b
+    timeout_seconds: 30
+    temperature: 0.0
+    max_tokens: 256
 
-Example:
+  - id: l2
+    name: lfm2.5-8b-a1b
+    endpoint: http://127.0.0.1:8082/v1
+    model: lfm2.5-8b-a1b
+    timeout_seconds: 60
+    temperature: 0.2
+    max_tokens: 2048
+
+  - id: l3
+    name: qwen3.6-35b-a3b
+    endpoint: http://127.0.0.1:8083/v1
+    model: qwen3.6-35b-a3b
+    timeout_seconds: 120
+    temperature: 0.2
+    max_tokens: 4096
+```
+
+Rules are evaluated top-to-bottom; the first enabled match wins.
 
 ```yaml
 routing:
@@ -86,16 +123,11 @@ routing:
       enabled: true
       condition:
         keywords:
-          any:
-            - implement
-            - refactor
-            - debug
+          any: [implement, refactor, debug, repository, source code]
       route: l2
 
   default_route: l1
 ```
-
-Rules are evaluated top-to-bottom and the first enabled match wins.
 
 Supported prompt-length operators:
 
@@ -107,61 +139,47 @@ lte
 eq
 ```
 
-Invalid configuration fails at startup rather than silently becoming a non-match.
+Invalid configuration fails at startup.
 
 ## L1 Contract
 
-L1 is both the router and the lightweight worker.
+L1 is both router and lightweight worker.
 
-For a request it can handle:
+For an L1 answer:
 
 ```json
-{
-  "route": "l1",
-  "confidence": 0.95,
-  "reason_code": "simple_question",
-  "answer": "..."
-}
+{"route":"l1","confidence":0.95,"reason_code":"simple_question","answer":"actual answer"}
 ```
 
 For escalation:
 
 ```json
-{
-  "route": "l2",
-  "confidence": 0.88,
-  "reason_code": "complex_reasoning"
-}
+{"route":"l2","confidence":0.95,"reason_code":"complex_reasoning","answer":""}
 ```
 
-Only `l1` and `l2` are valid routes. L1 never selects a physical endpoint.
+L1 output is untrusted. Invalid JSON is retried once; a second invalid response falls back to L2. Low-confidence L1 decisions also escalate.
 
-If L1 returns malformed JSON, TinyRouter retries once. If the second response is invalid, the request falls back to L2.
-
-Low-confidence L1 decisions also escalate to L2.
+The model's self-reported confidence is a heuristic, not a calibrated probability. Benchmark quality must be measured separately.
 
 ## Router API
-
-TinyRouter exposes an OpenAI-compatible endpoint:
 
 ```text
 POST http://127.0.0.1:8090/v1/chat/completions
 ```
 
-Example:
+Example normal request:
 
-```bash
-curl http://127.0.0.1:8090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "router",
-    "messages": [
-      {"role": "user", "content": "What is dependency injection?"}
-    ]
-  }'
+```json
+{"model":"router","messages":[{"role":"user","content":"What is dependency injection?"}]}
 ```
 
-The physical L1/L2 endpoints are controlled only by `router.yaml`.
+Example direct L3 request:
+
+```json
+{"model":"router","messages":[{"role":"user","content":"@l3 Design a production-grade payment platform."}]}
+```
+
+The physical endpoints are controlled only by YAML. The client cannot provide an arbitrary endpoint.
 
 ## Installation
 
@@ -169,28 +187,17 @@ Requires Python 3.11+.
 
 ```bash
 python -m venv .venv
-```
-
-Activate the environment, then:
-
-```bash
 pip install -e .
 ```
 
-The only runtime dependency is PyYAML. HTTP communication uses the Python standard library.
+The only runtime dependency is PyYAML. HTTP uses the Python standard library.
 
 ## Run
 
-Start the router with:
+Start TinyRouter:
 
 ```bash
 tiny-router --config config/router.yaml
-```
-
-or:
-
-```bash
-python -m kiss_router.server --config config/router.yaml
 ```
 
 Default endpoint:
@@ -199,31 +206,19 @@ Default endpoint:
 http://127.0.0.1:8090/v1/chat/completions
 ```
 
-The configured inference servers must already be running at the endpoints in `config/router.yaml`.
+The configured inference servers must already be running.
 
 ## Test
 
-Run:
-
 ```bash
-python -m pytest
+python -m pytest -v
 ```
 
-The tests cover the core routing contract, including:
-
-- deterministic rule matching;
-- first-match behavior;
-- configuration validation;
-- Rules → L2 bypass;
-- one-call L1 handling;
-- L1 → L2 escalation;
-- low-confidence escalation;
-- malformed L1 output and retry/fallback;
-- failure telemetry.
+Tests cover rules, configuration validation, L1/L2 orchestration, failure handling, and `@l2`/`@l3` overrides.
 
 ## Benchmark
 
-The repository includes a fixed **50-request benchmark set**:
+The repository contains a 50-request set:
 
 ```text
 10 simple
@@ -233,200 +228,71 @@ The repository includes a fixed **50-request benchmark set**:
 10 long-context
 ```
 
-The prompts are in `benchmarks/test_set.json`. The long-context prompts are expanded at runtime so the repository does not contain 100 KB of duplicated text.
-
-### 1. Start the model servers
-
-Use your normal llama.cpp commands, with the endpoints configured as:
-
-```text
-Qwen 3.6 0.8B   → http://127.0.0.1:8081/v1
-LFM2.5-8B-A1B   → http://127.0.0.1:8082/v1
-TinyRouter      → http://127.0.0.1:8090/v1
-```
-
-### 2. Start TinyRouter
-
-```bash
-tiny-router --config config/router.yaml
-```
-
-### 3. Run the benchmark
-
-From the repository root:
+Run:
 
 ```bash
 python benchmarks/run_benchmark.py
 ```
 
-The default runner compares every prompt against:
-
-```text
-Baseline:   prompt → L2
-Router:     prompt → TinyRouter → L1/L2
-```
-
-It performs one warm-up request against each path first, then measures all 50 prompts.
-
-Results are written to:
+Results:
 
 ```text
 benchmark-results/results.csv
 benchmark-results/summary.json
 ```
 
-The CSV contains per-request latency, prompt size, route, source, L1 latency, escalation, and token usage where the model server reports it.
-
-The router exposes benchmark-only metadata through response headers such as:
+The important measurements are:
 
 ```text
-X-TinyRouter-Route
-X-TinyRouter-Source
-X-TinyRouter-Model
-X-TinyRouter-L1-Latency-Ms
-X-TinyRouter-Total-Latency-Ms
-X-TinyRouter-Escalation
+L1 handled
+L1 escalations
+Rules → L2
+L2 calls avoided
+L1 latency
+Total latency
+Token usage
+L1 answer quality/error rate
 ```
 
-These avoid adding a separate telemetry API to the POC.
+Do not use Open WebUI for the first benchmark. Test TinyRouter directly so additional context and network overhead do not contaminate the experiment.
 
-### Useful options
+## Design Constraints
 
-Run three passes:
+- **KISS** — keep the router small.
+- **YAGNI** — add features only when measurements justify them.
+- **DRY** — one shared model client.
+- **POLA** — deterministic behavior from YAML and explicit user markers.
 
-```bash
-python benchmarks/run_benchmark.py --repeats 3
-```
-
-Use different endpoints:
-
-```bash
-python benchmarks/run_benchmark.py \
-  --router http://127.0.0.1:8090/v1/chat/completions \
-  --l2 http://127.0.0.1:8082/v1/chat/completions
-```
-
-Use a different result directory:
-
-```bash
-python benchmarks/run_benchmark.py --out benchmark-results/run-01
-```
-
-### Interpreting the result
-
-The primary metric is **L2 calls avoided**.
-
-For 50 requests, if TinyRouter produces:
-
-```text
-L1 handled       25
-L1 escalated     10
-Direct L2        15
-Total L2 calls   25
-```
-
-then:
-
-```text
-L2 calls avoided = 50 - 25 = 25
-L2 avoidance     = 50%
-```
-
-Also compare:
-
-- baseline average latency vs router average latency;
-- L1 routing latency;
-- L1 escalation rate;
-- route accuracy against the benchmark's expected routing hypothesis;
-- token usage where available.
-
-The expected routes are deliberately simple hypotheses: simple/medium → L1, complex/coding/long-context → L2. They are not a claim that every model decision is objectively wrong when it differs. Review misroutes manually before changing the rules or L1 prompt.
-
-**Do not use Open WebUI for this benchmark.** It adds another context and network layer and makes the routing experiment harder to interpret. Benchmark the router endpoint directly first.
-
-## Telemetry
-
-The POC records routing events in memory.
-
-Important measurements include:
-
-```text
-L1 latency/tokens = routing overhead
-Total latency     = user-visible request cost
-L2 latency/tokens = worker cost when escalation occurs
-```
-
-This is intentionally not backed by a database or distributed telemetry system yet.
+Do not add agents, RAG, MCP, vector databases, rule scripting, distributed tracing, queues, or load balancing to this POC without evidence that they are required.
 
 ## Repository Layout
 
 ```text
 TinyRouter/
 ├── benchmarks/
-│   ├── test_set.json
-│   └── run_benchmark.py
-├── config/
-│   └── router.yaml
-├── docs/
-│   ├── kiss_local_ai_router_poc_context.md
-│   └── ...
-├── src/
-│   └── kiss_router/
-│       ├── client.py
-│       ├── config.py
-│       ├── l1.py
-│       ├── models.py
-│       ├── orchestrator.py
-│       ├── rules.py
-│       └── server.py
+├── config/router.yaml
+├── docs/kiss_local_ai_router_poc_context.md
+├── src/kiss_router/
+│   ├── client.py
+│   ├── config.py
+│   ├── l1.py
+│   ├── models.py
+│   ├── orchestrator.py
+│   ├── rules.py
+│   └── server.py
 ├── tests/
-│   ├── test_config.py
-│   ├── test_orchestrator.py
-│   └── test_rules.py
 ├── pyproject.toml
 └── README.md
 ```
 
-## Design Constraints
+## Current Experiment
 
-TinyRouter intentionally follows:
-
-- **KISS** — keep the router small;
-- **YAGNI** — implement only what the experiment needs;
-- **DRY** — one model client for L1 and L2;
-- **POLA** — routing behavior should be predictable from YAML.
-
-Do not add agents, RAG, MCP, vector databases, rule scripting, distributed tracing, load balancing, or complex retry systems until measurements justify them.
-
-## Next Experiment
-
-The next step is benchmarking, not adding architecture.
-
-Compare:
+The current candidate configuration is:
 
 ```text
-Baseline:
-Request → L2
-
-TinyRouter:
-Request → Rules → L1/L2
+L1 → LFM2.5-1.2B-Instruct-Q6
+L2 → LFM2.5-8B-A1B
+L3 → Qwen3.6-35B-A3B
 ```
 
-Measure:
-
-- percentage handled by L1;
-- percentage routed directly to L2 by rules;
-- L1 escalation rate;
-- L1 routing latency;
-- total latency;
-- L2 calls avoided;
-- token usage;
-- answer quality/error rate.
-
-The router is successful only if the routing overhead is outweighed by avoided L2 work without unacceptable quality loss.
-
-## Documentation
-
-The detailed POC user story, architecture decisions, review findings, corrected contracts, and next experiment are documented in:
-
-`docs/kiss_local_ai_router_poc_context.md`
+The direct `@l2`/`@l3` override exists so users can bypass routing when they explicitly need a stronger model. The benchmark should evaluate automatic routing separately from explicit overrides.
