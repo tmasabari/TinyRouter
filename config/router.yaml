@@ -7,6 +7,12 @@ models:
     name: lfm2.5-1.2b
     endpoint: http://127.0.0.1:8081/v1
     model: lfm2.5-1.2b
+    capability_prompt: |
+      You are L1. Decide only whether you can answer the user's request correctly.
+      Return can_handle when you can give a correct concise answer.
+      Return escalate when the request exceeds your capability or you are uncertain.
+      Return ONLY JSON: {"status":"can_handle|escalate","reason_code":"brief_reason","answer":""}.
+      For can_handle, answer must be the complete user-facing answer. For escalate, answer must be empty.
     timeout_seconds: 30
     temperature: 0.0
     max_tokens: 256
@@ -14,6 +20,11 @@ models:
     name: lfm2.5-8b-a1b
     endpoint: http://127.0.0.1:8082/v1
     model: lfm2.5-8b-a1b
+    capability_prompt: |
+      You are L2. Decide whether you can answer the user's request correctly.
+      Return can_handle when you can give the complete answer. Return escalate when the request needs a stronger model.
+      Return ONLY JSON: {"status":"can_handle|escalate","reason_code":"brief_reason","answer":""}.
+      For can_handle, answer must be the complete user-facing answer. For escalate, answer must be empty.
     timeout_seconds: 60
     temperature: 0.2
     max_tokens: 2048
@@ -21,10 +32,17 @@ models:
     name: qwen3.6-35b-a3b
     endpoint: http://127.0.0.1:8083/v1
     model: qwen3.6-35b-a3b
+    capability_prompt: |
+      You are L3. Answer the user's request.
+      Return ONLY JSON: {"status":"can_handle","reason_code":"final_answer","answer":"complete user-facing answer"}.
     timeout_seconds: 120
     temperature: 0.2
     max_tokens: 4096
 routing:
+  max_hops: 3
+  escalation_defaults:
+    l1: l2
+    l2: l3
   rules:
     - name: long_prompt
       enabled: true
@@ -38,15 +56,22 @@ routing:
       enabled: true
       condition: {keywords: {any: [architecture, system design]}}
       route: l2
+    - name: l1_complex
+      enabled: true
+      source: l1
+      condition:
+        reason_codes: {any: [complex_reasoning, needs_more_reasoning, insufficient_capability]}
+      route: l2
+    - name: l2_complex
+      enabled: true
+      source: l2
+      condition:
+        reason_codes: {any: [complex_reasoning, needs_more_reasoning, insufficient_capability]}
+      route: l3
   default_route: l1
-l1:
-  routing_prompt: |
-    You are L1, a fast local router.
-    Use route=l1 only when you can answer the request correctly with a short response and without multi-step reasoning.
-    Use route=l2 for coding, debugging, architecture, mathematics, calculations, complex reasoning, comparisons, trade-offs, long-context requests, or uncertainty.
-    If confidence is below 0.90, use route=l2.
-    Return ONLY one JSON object.
-    For route=l1 include the complete user-facing answer.
-    For route=l2 set answer to an empty string.
-    Schema: {"route":"l1|l2","confidence":0.0,"reason_code":"brief_reason","answer":""}
-  low_confidence_threshold: 0.70
+logging:
+  level: INFO
+  console: true
+  file: logs/tinyrouter.log
+  queue_size: 4096
+  include_content: false
