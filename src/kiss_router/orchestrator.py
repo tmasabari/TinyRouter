@@ -21,6 +21,8 @@ class Orchestrator:
         if not prompt:
             raise ValueError("a user message is required")
         request_id, started = str(uuid4()), time.perf_counter()
+        current_route = override or "unknown"
+        hop = 0
         try:
             if override:
                 response = await self.client.chat(self.config.models[override], messages)
@@ -29,6 +31,7 @@ class Orchestrator:
             visited = set()
             for hop in range(self.config.max_hops):
                 route = decision.route
+                current_route = route
                 if route in visited:
                     raise RuntimeError(f"routing cycle detected at {route}")
                 visited.add(route)
@@ -42,11 +45,11 @@ class Orchestrator:
                     raise RuntimeError(f"no valid escalation route for {route}: {capability.reason_code}")
             raise RuntimeError(f"maximum routing hops exceeded ({self.config.max_hops})")
         except Exception as error:
-            self.events.append(RoutingEvent(request_id, locals().get("decision", override or "unknown"), "error", None,
-                                             locals().get("route", override or "unknown"), round((time.perf_counter() - started) * 1000),
-                                             len(prompt), None, None, False, False, locals().get("hop", 0) + 1, str(error)))
+            self.events.append(RoutingEvent(request_id, current_route, "error", None,
+                                             current_route, round((time.perf_counter() - started) * 1000),
+                                             len(prompt), None, None, False, False, hop + 1, str(error)))
             if self.logger:
-                self.logger.error("request=%s error=%s", request_id, error)
+                self.logger.error("request=%s route=%s error=%s", request_id, current_route, error)
             raise
 
     def _finish(self, request_id, decision, response, prompt, started, hops):
