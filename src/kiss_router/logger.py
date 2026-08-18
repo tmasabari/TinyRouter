@@ -19,7 +19,8 @@ class AsyncLogger:
         self.queue = queue.Queue(maxsize=config.queue_size)
         self.logger = logging.getLogger("tinyrouter")
         self.logger.handlers.clear()
-        self.logger.setLevel(getattr(logging, config.level))
+        level = TRACE if config.level == "TRACE" else getattr(logging, config.level)
+        self.logger.setLevel(level)
         self.logger.propagate = False
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
         handlers = []
