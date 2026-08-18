@@ -36,6 +36,9 @@ class AsyncLogger:
         self.listener = QueueListener(self.queue, *handlers, respect_handler_level=True)
         self.listener.start()
 
+    def __getattr__(self, name):
+        return getattr(self.logger, name)
+
     def close(self):
         self.listener.stop()
         self.logger.removeHandler(self.handler)
